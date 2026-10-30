@@ -1,0 +1,358 @@
+"""Penny Radar: watch the spike-tier movers and MEASURE what happens next.
+
+The trading baskets keep their liquidity floors (below them, simulated fills
+are fiction). But watching costs nothing and measuring settles arguments:
+every morning this logs the wildest low-priced movers, then fills in each
+past pick's forward returns (+1, +5, +20 trading days) as the future arrives.
+
+After a few weeks, penny_radar.csv IS the answer to "are these spikes worth
+chasing?" - computed from your own watchlist, not from anyone's opinion.
+
+Also feeds the top names into the news watcher (news_extra.txt) so their
+headlines appear in your feed.
+
+Run:  python run_pennyradar.py                 # daily capture + update
+      python run_pennyradar.py --add BJDX      # force-track a specific name
+Scheduled 8:20 AM weekdays.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import logging
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+log = logging.getLogger("bot.pennyradar")
+
+RADAR_CSV = Path("penny_radar.csv")
+NEWS_EXTRA = Path("news_extra.txt")
+# User directive 2026-08-11: $2-300, not penny stocks. The radar watches
+# the band the sleeve trades.
+MIN_PRICE = 2.0
+MAX_PRICE = 1000.0  # covers the mover sleeve's full band (user 2026-08-13)
+MIN_DVOL_M = 1.0          # watch-only floor - deliberately tiny
+TOP_N = 8
+COLS = ["date", "symbol", "captured", "price", "dollar_vol_m", "ann_vol", "best_day",
+        "mom_1m", "max_dd_2y", "float_m", "ipo_months", "mcap_m", "news", "ai",
+        "rvol_open", "sec_flags", "fwd_1d", "fwd_5d", "fwd_20d", "status"]
+
+
+def save_radar(radar: pd.DataFrame) -> None:
+    """Atomic write - two processes touch this file (radar task + pennymo's
+    mid-session refresh); a torn write would orphan every tracked pick."""
+    import os
+
+    tmp = RADAR_CSV.with_suffix(".csv.tmp")
+    radar.to_csv(tmp, index=False)
+    os.replace(tmp, RADAR_CSV)
+
+
+def load_radar() -> pd.DataFrame:
+    if RADAR_CSV.exists():
+        return pd.read_csv(RADAR_CSV, dtype={"symbol": str})
+    return pd.DataFrame(columns=COLS)
+
+
+def capture_today(radar: pd.DataFrame, extra: list[str],
+                  ai: bool = False) -> pd.DataFrame:
+    """ai=True (the 8:20 radar task only) adds a Claude advisory read per
+    pick. pennymo's mid-session refresh keeps ai=False - an API call has no
+    business inside the trading loop."""
+    from run_screener import candidate_symbols, score_symbol
+
+    today = dt.date.today().isoformat()
+    already = set(radar.loc[radar["date"] == today, "symbol"])
+
+    picks: list[dict] = []
+    try:
+        pool = candidate_symbols(max_price=MAX_PRICE)
+    except Exception as e:
+        log.warning("screener unavailable (%s) - manual adds only", e)
+        pool = []
+    snap_dvol: dict = {}
+    try:
+        # Polygon full-market snapshot: every US ticker's live day-change in
+        # ONE call. Merged AHEAD of the screener pool - during pennymo's
+        # mid-session refresh this is how a fresh spike gets seen in seconds
+        # instead of on the screener's delayed pass. Fail-open.
+        from bot import polygon
+
+        snap = polygon.snapshot_movers(min_pct=10.0, lo=MIN_PRICE, hi=MAX_PRICE,
+                                       min_dvol_m=MIN_DVOL_M)
+        if snap:
+            log.info("Polygon snapshot: %d live movers >=+10%% merged (top: %s)",
+                     len(snap), ", ".join(f"{m['symbol']} +{m['pct']}%"
+                                          for m in snap[:5]))
+            pool = [m["symbol"] for m in snap] + pool
+            snap_dvol = {m["symbol"]: m["dollar_vol_m"] for m in snap}
+    except Exception:
+        log.debug("polygon snapshot unavailable", exc_info=True)
+    from bot.config import BLOCKED_SYMBOLS
+
+    tox = None
+    try:
+        from bot.toxicity import block_reason as _tox_block
+        from bot.toxicity import load as _tox_load
+
+        tox = _tox_load()
+    except Exception:
+        pass
+
+    scored = []
+    for sym in list(dict.fromkeys([s.upper() for s in extra] + pool))[:70]:
+        if sym in BLOCKED_SYMBOLS:
+            continue  # no ETFs, no gambling stocks (user directives 2026-08-05)
+        if tox is not None:
+            try:
+                why = _tox_block(sym, tox)
+                if why:
+                    log.info("RADAR skip %s: %s", sym, why)
+                    continue
+            except Exception:
+                pass
+        row = score_symbol(sym)
+        if row is None:
+            if sym in extra:
+                log.warning("%s: no scoreable data", sym)
+            continue
+        forced = row["symbol"] in extra
+        if forced or (MIN_PRICE <= row["price"] <= MAX_PRICE
+                      and row["dollar_vol_m"] >= MIN_DVOL_M):
+            scored.append((forced, row))
+    # RANKING UPGRADE (2026-09-01, from the research sweep): opening relative
+    # volume is a MONOTONE continuous predictor of follow-through in the
+    # peer-reviewed stocks-in-play data (-0.02R below 1x to +0.38R above 30x)
+    # - so candidates are ORDERED by today's volume vs their own normal-by-
+    # now, not just by history. Pick order = watchlist order = which mover
+    # gets the entry slot first. Fallback: the old big-moves ranking.
+    def _rvol_rank(row) -> float:
+        try:
+            from bot.scanner import expected_volume_fraction
+
+            base = float(row.get("dollar_vol_m") or 0)
+            snap_now = float(snap_dvol.get(row["symbol"], 0))
+            frac = expected_volume_fraction(dt.datetime.now())
+            if base > 0 and snap_now > 0 and frac > 0:
+                return snap_now / (base * frac)
+        except Exception:
+            pass
+        return 0.0
+
+    for _, row in scored:
+        row["rvol_open"] = round(_rvol_rank(row), 1) or None
+    scored.sort(key=lambda fr: (not fr[0], -(fr[1].get("rvol_open") or 0),
+                                -(fr[1]["big_moves_3m"] or 0)))
+
+    for forced, row in scored[: TOP_N + len(extra)]:
+        if row["symbol"] in already:
+            continue
+        try:
+            from bot.edgar import dilution_flags, is_china_based
+
+            if is_china_based(row["symbol"]):
+                log.info("RADAR skip %s: China/HK-based company (user directive "
+                         "2026-08-05)", row["symbol"])
+                continue
+            sec_flags = dilution_flags(row["symbol"])
+        except Exception:
+            sec_flags = ""
+        try:
+            from bot.scanner import enrich_symbol
+
+            en = enrich_symbol(row["symbol"])
+        except Exception:
+            en = {}
+        # Security-type backstop (review finding): 5-letter warrants/units/
+        # rights (HYMCW-style) pass every symbol-shape filter; Polygon's
+        # reference 'type' is authoritative. Fail-open: unknown type passes.
+        if en.get("sec_type") in ("WARRANT", "UNIT", "RIGHT", "ETF", "ETN",
+                                  "ETV", "FUND", "SP", "ADRW", "ADRR"):
+            log.info("RADAR skip %s: security type %s (not common stock)",
+                     row["symbol"], en["sec_type"])
+            continue
+        try:
+            # Warm the symbol's OWN intraday volume curve (weekly cache) so
+            # the engine's RVOL reads it with zero network cost. Task-context
+            # network is fine; the engine only ever calls the cache reader.
+            from bot.scanner import build_symbol_curve
+
+            if build_symbol_curve(row["symbol"]):
+                log.info("RVOL curve ready for %s (per-symbol, 20-session)",
+                         row["symbol"])
+        except Exception:
+            pass
+        news = ""
+        arts = []
+        try:
+            # Catalyst check (Polygon news + sentiment): a spike WITH a story
+            # behaves differently from a story-less pump. Logged as evidence.
+            from bot import polygon
+
+            arts = polygon.ticker_news(row["symbol"], limit=3)
+            if arts:
+                news = f"{len(arts)}:{arts[0].get('sentiment') or '?'}"
+                log.info("NEWS %s [%s]: %s", row["symbol"],
+                         arts[0].get("sentiment") or "?", arts[0]["title"][:80])
+        except Exception:
+            pass
+        ai_read = ""
+        if ai:
+            try:
+                # Claude advisory read (ADVISORY ONLY - journaled evidence,
+                # graded against forward returns at gates like the Brain).
+                from bot import ai_analyst
+                from bot.data import fetch_yahoo_daily
+
+                if ai_analyst.is_enabled():
+                    res = ai_analyst.analyze_symbol(
+                        row["symbol"], fetch_yahoo_daily(row["symbol"], years=1),
+                        headlines=[a["title"] for a in arts] or None)
+                    if res:
+                        ai_read = f"{res.sentiment}:{res.confidence:.2f}"
+            except Exception:
+                log.debug("AI read failed for %s", row["symbol"], exc_info=True)
+        pick = {
+            "date": today, "symbol": row["symbol"],
+            "captured": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "sec_flags": sec_flags, "news": news, "ai": ai_read,
+            "rvol_open": row.get("rvol_open"),
+            "float_m": en.get("float_m"), "ipo_months": en.get("ipo_months"),
+            "mcap_m": en.get("mcap_m"),
+            "price": round(row["price"], 4),
+            "dollar_vol_m": round(row["dollar_vol_m"], 2),
+            "ann_vol": round(row["ann_vol"], 1),
+            "best_day": round(row["best_day"], 1),
+            "mom_1m": round(row["mom_1m"], 1) if row["mom_1m"] is not None else None,
+            "max_dd_2y": round(row["max_dd_2y"], 1),
+            "fwd_1d": None, "fwd_5d": None, "fwd_20d": None, "status": "tracking",
+        }
+        picks.append(pick)
+        log.info("RADAR +%s: $%.2f, %.0f%% vol, best day %+.0f%%%s",
+                 row["symbol"], row["price"], row["ann_vol"], row["best_day"],
+                 f"  DILUTION FLAGS: {sec_flags}" if sec_flags else "")
+        # Advisory Penny Brain score, once enough picks have resolved to
+        # train one (run_pennybrain). Logged AND ledgered so every
+        # prediction gets graded against the outcome later - never a gate.
+        try:
+            from run_pennybrain import score_pick
+
+            p = score_pick(pick)
+            if p is not None:
+                log.info("BRAIN %s: P(still up in 5d) = %.2f", row["symbol"], p)
+                import csv as _csv
+
+                pred = Path("penny_predictions.csv")
+                fresh = not pred.exists() or pred.stat().st_size == 0
+                seen = set()
+                if not fresh:
+                    with pred.open(newline="", encoding="utf-8") as f:
+                        seen = {(r.get("date"), r.get("symbol"))
+                                for r in _csv.DictReader(f)}
+                if (today, row["symbol"]) not in seen:  # one prediction per pick
+                    with pred.open("a", newline="", encoding="utf-8") as f:
+                        w = _csv.DictWriter(f, fieldnames=["date", "symbol", "captured", "p"],
+                                            restval="", extrasaction="ignore")
+                        if fresh:
+                            w.writeheader()
+                        w.writerow({"date": today, "symbol": row["symbol"],
+                                    "captured": pick["captured"], "p": round(p, 4)})
+        except Exception:
+            log.debug("penny brain unavailable", exc_info=True)
+    return pd.concat([radar, pd.DataFrame(picks)], ignore_index=True) if picks else radar
+
+
+def update_forward_returns(radar: pd.DataFrame) -> pd.DataFrame:
+    """Fill each pick's forward returns as the future arrives.
+
+    Anchored at the first price actually tradeable AFTER the pick existed:
+      - pre-open captures (the 8:20 task): the pick day's OPEN
+      - intraday/after-close captures (pennymo's refresh): the NEXT
+        session's open - anchoring those at the pick day's open would credit
+        the pick with hours of run-up that happened BEFORE it was made,
+        poisoning both the scoreboard and the Penny Brain's labels.
+    Legacy rows without a capture time are treated as post-open (correct for
+    the rows that existed when this was written).
+
+    A transient fetch failure just retries tomorrow; a pick is only marked
+    delisted-suspect when its price history has verifiably STOPPED.
+    """
+    from bot.data import fetch_yahoo_daily
+
+    today = pd.Timestamp.today().normalize()
+    for i, row in radar.iterrows():
+        if row["status"] not in ("tracking",) or pd.notna(row["fwd_20d"]):
+            continue
+        try:
+            bars = fetch_yahoo_daily(row["symbol"], years=1)
+        except Exception:
+            log.debug("%s: fetch failed - will retry next run", row["symbol"])
+            continue
+        rec_date = pd.Timestamp(row["date"])
+        cap = str(row.get("captured") or "")
+        pre_open = len(cap) >= 16 and cap[:10] == str(row["date"]) and cap[11:16] < "09:30"
+        pos = bars.index.searchsorted(rec_date, side="left" if pre_open else "right")
+        if pos >= len(bars):
+            if (today - bars.index[-1]).days > 10:
+                radar.loc[i, "status"] = "no_data(delisted?)"
+            continue
+        base = float(bars["open"].iloc[pos])
+        if not np.isfinite(base) or base <= 0:
+            base = float(row["price"])
+        for col, off in (("fwd_1d", 0), ("fwd_5d", 4), ("fwd_20d", 19)):
+            if pd.isna(row[col]) and pos + off < len(bars):
+                radar.loc[i, col] = round(
+                    100 * (float(bars["close"].iloc[pos + off]) / base - 1), 1
+                )
+        if pd.notna(radar.loc[i, "fwd_20d"]):
+            radar.loc[i, "status"] = "complete"
+        elif (today - bars.index[-1]).days > 10:
+            radar.loc[i, "status"] = "no_data(delisted?)"  # stopped trading mid-window
+    return radar
+
+
+def print_scoreboard(radar: pd.DataFrame) -> None:
+    print(f"\nPenny Radar: {len(radar)} picks tracked since inception")
+    print("  (returns measured pick-day open -> session close: day 1 / 5 / 20)")
+    for col, label in (("fwd_1d", "day 1"), ("fwd_5d", "day 5"), ("fwd_20d", "day 20")):
+        vals = pd.to_numeric(radar[col], errors="coerce").dropna()
+        if len(vals):
+            pos = 100 * (vals > 0).mean()
+            print(f"  {label:>8}: avg {vals.mean():+6.1f}%   median {vals.median():+6.1f}%   "
+                  f"positive {pos:.0f}%   (n={len(vals)})")
+    dead = (radar["status"] == "no_data(delisted?)").sum()
+    if dead:
+        print(f"  possibly delisted since pick: {dead}")
+    if not len(radar):
+        print("  (first picks appear after the next market-day capture)")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Penny-mover radar (watch-only)")
+    parser.add_argument("--add", nargs="*", default=[], help="Force-track specific symbols")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler("pennyradar.log", encoding="utf-8")],
+    )
+
+    radar = load_radar()
+    radar = capture_today(radar, [s.upper() for s in args.add], ai=True)
+    radar = update_forward_returns(radar)
+    save_radar(radar)
+
+    # Feed the freshest picks to the news watcher.
+    recent = radar[radar["status"] == "tracking"]["symbol"].drop_duplicates().tail(5)
+    NEWS_EXTRA.write_text("\n".join(recent) + "\n", encoding="utf-8")
+
+    print_scoreboard(radar)
+    print(f"\nData: {RADAR_CSV} | news watcher now also follows: {', '.join(recent) if len(recent) else '-'}")
+
+
+if __name__ == "__main__":
+    main()
