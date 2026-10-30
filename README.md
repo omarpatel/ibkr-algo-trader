@@ -1,5 +1,12 @@
 # IBKR Algo Trader
 
+[![CI](https://github.com/omarpatel/ibkr-algo-trader/actions/workflows/ci.yml/badge.svg)](https://github.com/omarpatel/ibkr-algo-trader/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![pandas](https://img.shields.io/badge/pandas-150458?logo=pandas&logoColor=white)
+![XGBoost](https://img.shields.io/badge/XGBoost-ML%20filter-EB5E28)
+![Interactive Brokers](https://img.shields.io/badge/Interactive%20Brokers-ib__async-D71920)
+
 A Python research and paper-trading framework for Interactive Brokers, built around honest backtesting and hard risk limits.
 
 ## Overview
@@ -75,7 +82,13 @@ Environment variables (see `.env.example`):
 | `SEC_USER_AGENT` | User-Agent sent to SEC EDGAR (SEC requires a contact) |
 | `I_UNDERSTAND_LIVE_TRADING_RISKS` | Must be `yes` to connect to a live account |
 
-Tests: `pytest tests`.
+Lint and tests (also run in CI on every push):
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest
+```
 
 ## Project structure
 
