@@ -92,3 +92,5 @@ polylab_events_*.csv
 growthlab_results.csv
 orblab_events.csv
 orblab_events_*.csv
+
+.ruff_cache/

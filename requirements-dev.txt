@@ -1,0 +1,6 @@
+# Test and lint dependencies (also installs the runtime requirements)
+-r requirements.txt
+scikit-learn>=1.4      # ML trade-filter pipeline (run_ml_filter.py)
+xgboost>=2.0
+pytest>=8
+ruff>=0.6
