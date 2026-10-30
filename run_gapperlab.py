@@ -248,7 +248,7 @@ def runner_analysis() -> list[str]:
         f"  crossed +100% intraday: {100 * hit100:.0f}%   +150%: {100 * hit150:.0f}%",
         f"  median HOD extension from open: {ext.median():+.0f}%",
         f"  of runners, {100 * (ext >= 200).mean():.0f}% reached +200%+ (the true 3x)",
-        f"  OVERNIGHT (next-open vs RTH close - what the EOD flatten skips):",
+        "  OVERNIGHT (next-open vs RTH close - what the EOD flatten skips):",
         f"    avg {on.mean():+.1f}%, median {on.median():+.1f}%, "
         f"positive {100 * (on > 0).mean():.0f}%  (n={len(on)})",
         "    -> negative/near-zero median = the flatten AVOIDS a bad hold, not",

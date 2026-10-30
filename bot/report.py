@@ -128,13 +128,14 @@ def render_report(
             "<th>Sharpe</th><th>Max drawdown</th><th>Trades</th></tr>"
         )
         rows = "".join(_fmt_row(*row) for row in s["rows"])
+        alt = f"Equity curves for {s['symbol']}"
         parts.append(
             f'<div class="card"><h2>{html.escape(s["symbol"])}</h2>'
-            f'{_png_tag(s["chart_png"], f"Equity curves for {s['symbol']}")}'
+            f'{_png_tag(s["chart_png"], alt)}'
             f"<table>{header}{rows}</table></div>"
         )
 
-    parts.append(f"""<div class="note"><b>How to read this honestly.</b>
+    parts.append("""<div class="note"><b>How to read this honestly.</b>
 Every line is net of commissions and slippage and computed with no lookahead
 (signals use data through yesterday's close, fills happen at today's open).
 The gray dashed line is buy-and-hold &mdash; the "do nothing" benchmark; a strategy

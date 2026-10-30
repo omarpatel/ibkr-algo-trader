@@ -1,7 +1,5 @@
 """Offline tests for bot/polygon.py parsers - no network, no key needed."""
 
-import datetime as dt
-
 from bot.polygon import (df_from_aggs, movers_from_snapshot, news_items,
                          overview_fields, parse_last_nbbo,
                          parse_last_nbbo_sizes, parse_last_trade,

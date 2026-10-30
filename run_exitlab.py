@@ -161,8 +161,8 @@ def main() -> None:
     out = pd.DataFrame(rows).sort_values("net_avg", ascending=False)
     print(out.to_string(index=False))
     out.to_csv("exitlab_results.csv", index=False)
-    print(f"\n[validation] scheme A must match run_eventstudy's numbers on this "
-          f"universe - if it doesn't, distrust everything above.")
+    print("\n[validation] scheme A must match run_eventstudy's numbers on this "
+          "universe - if it doesn't, distrust everything above.")
     print("[caveats] small n; 7-way comparison inflates the winner; survivorship;")
     print("daily-bar fills; decisions only at evaluation gates. -> exitlab_results.csv")
 

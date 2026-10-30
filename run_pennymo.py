@@ -975,8 +975,7 @@ def main() -> None:
 
                                 from bot.scanner import (cached_symbol_curve,
                                                          edge_spread_pct,
-                                                         rvol_estimate,
-                                                         split_mismatch)
+                                                         rvol_estimate)
 
                                 pr, dv = RADAR_STATS.get(symbol, (None, None))
                                 tb = todays_bars(bars)

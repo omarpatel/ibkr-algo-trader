@@ -233,10 +233,10 @@ def main() -> None:
     for y, grp in df.groupby("year"):
         print(f"    {y}: {len(grp):>4} events, net avg {100 * grp['ret_net'].mean():+7.2f}%, "
               f"winners {100 * (grp['ret_net'] > 0).mean():.0f}%")
-    print(f"\nCAVEATS (they flatter the results): survivorship universe; REVERSE-")
-    print(f"SPLIT adjustment hides pre-split penny episodes of serial splitters")
-    print(f"(their worst repeated collapses are invisible); same-day rung fills;")
-    print(f"ideal entries vs live's delayed capped limits; frictionless beyond")
+    print("\nCAVEATS (they flatter the results): survivorship universe; REVERSE-")
+    print("SPLIT adjustment hides pre-split penny episodes of serial splitters")
+    print("(their worst repeated collapses are invisible); same-day rung fills;")
+    print("ideal entries vs live's delayed capped limits; frictionless beyond")
     print(f"the {100 * COST_PCT:.1f}% haircut. Per-event rows: eventstudy_results.csv")
 
 

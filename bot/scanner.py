@@ -81,7 +81,7 @@ def curve_from_bars(bars: pd.DataFrame, min_days: int = 10) -> list[float] | Non
             total = float(day["volume"].sum())
             if total <= 0 or len(day) < 30:  # skip halt-shortened/thin days
                 continue
-            cum, slots = 0.0, []
+            slots = []
             for s in range(13):
                 end = dt.time(9 + (30 + (s + 1) * 30) // 60,
                               (30 + (s + 1) * 30) % 60)
